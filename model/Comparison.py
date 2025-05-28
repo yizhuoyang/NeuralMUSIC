@@ -6,13 +6,8 @@ import warnings
 import sys
 import torch.nn.functional as F
 sys.path.append("../")
-from DeepMucis_plus.utlis.util import SteeringVector, ModeVector_torch
+from DeepMucis_plus.utlis.util import SteeringVector, ModeVector_torch,Grid
 
-class Grid:
-    def __init__(self):
-        self.x = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_x.npy')
-        self.y = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_y.npy')
-        self.z = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_z.npy')
 
 class Encoder_cls(nn.Module):
     def __init__(self, dropout_prob=0.1):  # Add dropout_prob to control
