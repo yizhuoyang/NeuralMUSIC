@@ -5,8 +5,107 @@ from itertools import permutations
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu");
 import torch
 import torchaudio.transforms as T
-import random
-import pandas as pd
+from typing import Dict, List, Optional, Tuple, Any, Union
+# from __future__ import annotations
+from dataclasses import dataclass
+from pathlib import Path
+import scipy.io as sio
+
+@dataclass
+class CalibFromMat:
+    K: np.ndarray
+    R: np.ndarray
+    T: np.ndarray
+    kc: np.ndarray
+
+    @staticmethod
+    def from_mat(mat_path: Union[str, Path]) -> "CalibFromMat":
+        mat_path = Path(mat_path)
+        d = sio.loadmat(str(mat_path))
+        if "camData" not in d:
+            raise KeyError(f"'camData' not found in {mat_path}")
+
+        camData = d["camData"][0, 0]
+        K = camData["K"].astype(np.float32)
+        R = camData["R"].astype(np.float32)
+        T = camData["T"].astype(np.float32)
+        kc = camData["kc"].astype(np.float32).reshape(-1)
+
+        if T.shape != (3, 1):
+            if T.shape == (1, 3):
+                T = T.T
+            elif T.shape == (3,):
+                T = T.reshape(3, 1)
+            else:
+                raise ValueError(f"Unexpected T shape: {T.shape}")
+
+        kc = kc[:5]
+        return CalibFromMat(K=K, R=R, T=T, kc=kc)
+
+def parse_gt_xyz(gt_arr: np.ndarray) -> np.ndarray:
+    """
+    Support:
+      - (3,) single target
+      - (3K,) concatenated targets
+      - (K,3) multi-target
+    Return (K,3).
+    """
+    gt = np.asarray(gt_arr)
+    if gt.ndim == 1:
+        if gt.shape[0] == 3:
+            return gt.reshape(1, 3).astype(np.float32)
+        if gt.shape[0] % 3 == 0:
+            return gt.reshape(-1, 3).astype(np.float32)
+        raise ValueError(f"Unsupported 1D gt shape: {gt.shape}")
+    if gt.ndim == 2 and gt.shape[1] == 3:
+        return gt.astype(np.float32)
+    raise ValueError(f"Unsupported gt shape: {gt.shape}")
+
+def doa_xz_deg_from_xyz_cav3d(
+    xyz: np.ndarray,
+    calib: CalibFromMat,
+    assume_gt_in_camera_frame: bool = False,
+    mirror_x: bool = False,  
+) -> np.ndarray:
+    P = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
+
+    if assume_gt_in_camera_frame:
+        Pc = P
+    else:
+        Pc = (calib.R @ P.T + calib.T).T  # (K,3)
+
+    X = Pc[:, 0]
+    Z = Pc[:, 2]
+
+    if mirror_x:
+        X = -X
+
+    yaw = np.arctan2(X, Z)  
+    yaw_deg = np.degrees(yaw).astype(np.float32)
+    return yaw_deg
+
+def doa_xy_deg_from_xyz(xyz):
+    """
+    xyz: (3,) or (P,3)
+    returns: (P,) degree in [0,360)
+    """
+    xyz = np.asarray(xyz, dtype=np.float32)
+    if xyz.ndim == 1:
+        xyz = xyz[None, :]
+    x = xyz[:, 0]
+    y = xyz[:, 1]
+    deg = np.degrees(np.arctan2(y, x))
+    deg = (deg + 360.0) % 360.0
+    return deg.astype(np.float32)
+
+def load_gt_dict(gt_path):
+    gt = np.load(str(gt_path), allow_pickle=True).item()
+    if not isinstance(gt, dict):
+        raise RuntimeError(f"GT is not a dict: {gt_path}")
+    return gt
+
+def stem(p):
+    return p.stem
 
 def downsample_audio(audio_tensor, target_length=1600):
     """
@@ -25,6 +124,75 @@ def downsample_audio(audio_tensor, target_length=1600):
     downsampled_audio = resampler(audio_tensor)  # Output shape: (C, 1600)
 
     return downsampled_audio
+class ModeVector_torch_copy:
+    """
+    A class for look-up tables of mode vectors using PyTorch.
+    This look-up table is an outer product of three vectors running along candidate locations,
+    time, and frequency. If the table is too large to store in memory, it computes values on the fly.
+    """
+    def __init__(self, L, fs, nfft, c, grid, mode="far", precompute=True, device='cpu'):
+        """
+        Parameters
+        ----------
+        L: torch.Tensor
+            Locations of the sensors (shape: [3, num_mics])
+        fs: int
+            Sampling frequency of the input signal
+        nfft: int
+            FFT length (must be even)
+        c: float
+            Speed of sound
+        grid: object
+            Grid object with attributes `x`, `y`, `z` (torch.Tensors)
+        mode: str, optional
+            'far' (default) or 'near', specifying the mode vector computation method
+        precompute: bool, optional
+            Whether to precompute the whole table (default: False)
+        device: str, optional
+            Device to store tensors (default: 'cpu')
+        """
+        if nfft % 2 == 1:
+            raise ValueError("FFT length must be even.")
+
+        self.device = torch.device(device)
+        self.precompute = precompute
+
+        # Propagation vectors
+        p_x = torch.tensor(grid.x).view(1, 1, -1).to(self.device)
+        p_y = torch.tensor(grid.y).view(1, 1, -1).to(self.device)
+        p_z = torch.tensor(grid.z).view(1, 1, -1).to(self.device)
+
+        # Microphone locations
+        r_x = torch.tensor(L[0]).view(1, -1, 1).to(self.device)
+        r_y = torch.tensor(L[1]).view(1, -1, 1).to(self.device)
+        r_z = torch.tensor(L[2]).view(1, -1, 1).to(self.device) if L.shape[0] == 3 else torch.zeros((1, L.shape[1], 1), device=self.device)
+
+        # Compute distance or projection
+        if mode == "near":
+            dist = torch.sqrt((p_x - r_x) ** 2 + (p_y - r_y) ** 2 + (p_z - r_z) ** 2)
+        elif mode == "far":
+            dist = (p_x * r_x) + (p_y * r_y) + (p_z * r_z)
+        else:
+            raise ValueError("Mode must be 'near' or 'far'")
+
+        self.tau = dist / c  # Time delay
+        self.omega = 2 * torch.pi * fs * torch.arange(nfft // 2 + 1, device=self.device) / nfft
+
+        if precompute:
+            self.mode_vec = torch.exp(1j * self.omega[:, None, None] * self.tau)
+        else:
+            self.mode_vec = None
+
+    def __getitem__(self, ref):
+        """
+        Retrieve mode vector values. Computes on the fly if not precomputed.
+        """
+        if self.precompute:
+            return self.mode_vec[ref]
+
+        w = self.omega[ref[0]].unsqueeze(-1) if isinstance(ref[0], slice) else self.omega[ref[0]]
+        tau_selected = self.tau if len(ref) == 1 else self.tau[:, ref[1], :] if len(ref) == 2 else self.tau[:, ref[1], ref[2]]
+        return torch.exp(1j * w * tau_selected)
 
 class ModeVector_torch:
     """
@@ -68,14 +236,17 @@ class ModeVector_torch:
         r_y = torch.tensor(L[1]).view(1, -1, 1)
         r_z = torch.tensor(L[2]).view(1, -1, 1) if L.shape[0] == 3 else torch.zeros((1, L.shape[1], 1))
 
+        # Compute distance or projection
         if mode == "near":
             dist = torch.sqrt((p_x - r_x) ** 2 + (p_y - r_y) ** 2 + (p_z - r_z) ** 2)
         elif mode == "far":
             dist = (p_x * r_x) + (p_y * r_y) + (p_z * r_z)
         else:
             raise ValueError("Mode must be 'near' or 'far'")
+
         self.tau = dist / c  # Time delay
         self.omega = 2 * torch.pi * fs * torch.arange(nfft // 2 + 1, ) / nfft
+
         if precompute:
             self.mode_vec = torch.exp(1j * self.omega[:, None, None] * self.tau)
         else:
@@ -91,7 +262,6 @@ class ModeVector_torch:
         w = self.omega[ref[0]].unsqueeze(-1) if isinstance(ref[0], slice) else self.omega[ref[0]]
         tau_selected = self.tau if len(ref) == 1 else self.tau[:, ref[1], :] if len(ref) == 2 else self.tau[:, ref[1], ref[2]]
         return torch.exp(1j * w * tau_selected)
-
 
 class SteeringVector:
     def __init__(self, mic_positions, angles):
@@ -123,7 +293,6 @@ class SteeringVector:
         phase_shifts = torch.exp(-1j * torch.matmul(self.mic_positions.to('cuda'), wave_vectors.T))  # [M, N]
 
         return phase_shifts.T  # [N, M]
-
 
 def filter_folders(folder_list, n):
     if n == 0:
@@ -223,6 +392,23 @@ class RMSPELoss(nn.Module):
         result = torch.sum(torch.stack(rmspe, dim = 0))
         return result
 
+class FocalLoss(torch.nn.Module):
+    """
+    Focal Loss for spectrum prediction.
+    """
+    def __init__(self, gamma=2.0, alpha=0.25, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def forward(self, preds, targets):
+        preds = preds.clamp(min=1e-6, max=1.0)  # 避免 log(0)
+        bce_loss = - (targets * torch.log(preds) + (1 - targets) * torch.log(1 - preds))
+        focal_weight = self.alpha * (1 - preds) ** self.gamma * targets + (1 - self.alpha) * preds ** self.gamma * (1 - targets)
+        loss = focal_weight * bce_loss
+        return loss.mean() if self.reduction == 'mean' else loss.sum()
+
 def normalize_magnitude(magnitude, method="min-max"):
     if method == "min-max":
         min_val = magnitude.min(dim=-1, keepdim=True)[0].min(dim=-2, keepdim=True)[0]  # Min over time and frequency
@@ -242,54 +428,6 @@ def normalize_phase(phase, method="scale"):
         phase_cos = torch.cos(phase)
         return phase_sin, phase_cos  # Returns two tensors
     return phase
-
-
-
-def compute_correlation_matrices_torch(X: torch.Tensor) -> torch.Tensor:
-    X = X.permute(2, 1, 0) 
-    C_hat = torch.matmul(X.unsqueeze(-1), X.unsqueeze(-2).conj())
-    C_hat = C_hat.mean(dim=0)
-    return C_hat
-
-class Grid:
-    def __init__(self):
-        self.x = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_x.npy')
-        self.y = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_y.npy')
-        self.z = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_z.npy')
-
-def array_aug(mic_offsets,locs,transform):
-    if transform:
-        random_integer = random.randint(0, 360)
-    else:
-        random_integer = 0
-    grid = Grid()
-    mic_center = np.array([[3, 3, 1]])
-    rotation_degree = random_integer
-    theta = np.deg2rad(rotation_degree)
-    R = np.array([
-        [np.cos(theta), -np.sin(theta), 0],
-        [np.sin(theta), np.cos(theta),  0],
-        [0,             0,              1]
-    ])
-    rotated_offsets = mic_offsets @ R.T
-    mic_locs_rotated = mic_center + rotated_offsets
-    mic_positions = mic_locs_rotated.T
-    steer_vector_calc = ModeVector_torch(torch.tensor(mic_positions), 16000, 512, 343, grid, "far", precompute=True)
-    sv = steer_vector_calc.mode_vec
-    return sv,(locs+rotation_degree)%360
-
-
-def load_dataframe(path):
-    df = pd.read_csv(path)
-    return df.to_dict('records')
-
-def load_numpy(path):
-    try:
-        data = np.load(path)
-    except Exception as e:
-        print(e)
-        return None
-    return data
 
 
 if __name__ == "__main__":

@@ -28,19 +28,6 @@ def generate_music_gt_class(doa_list: list, sigma=10):
     return gt  
 
 def autocorrelation_matrix(X: torch.Tensor, lag: int):
-    """
-    Computes the autocorrelation matrix for a given lag of the input samples.
-
-    Args:
-    -----
-        X (torch.Tensor): Samples matrix input with shape [N, T].
-        lag (int): The requested delay of the autocorrelation calculation.
-
-    Returns:
-    --------
-        torch.Tensor: The autocorrelation matrix for the given lag.
-
-    """
     Rx_lag = torch.zeros(X.shape[0], X.shape[0], dtype=torch.complex128).to(device)
     for t in range(X.shape[1] - lag):
         # meu = torch.mean(X,1)
@@ -54,24 +41,6 @@ def autocorrelation_matrix(X: torch.Tensor, lag: int):
 
 # def create_autocorrelation_tensor(X: torch.Tensor, tau: int) -> torch.Tensor:
 def create_autocorrelation_tensor(X: torch.Tensor, tau: int):
-    """
-    Returns a tensor containing all the autocorrelation matrices for lags 0 to tau.
-
-    Args:
-    -----
-        X (torch.Tensor): Observation matrix input with size (BS, N, T).
-        tau (int): Maximal time difference for the autocorrelation tensor.
-
-    Returns:
-    --------
-        torch.Tensor: Tensor containing all the autocorrelation matrices,
-                    with size (Batch size, tau, 2N, N).
-
-    Raises:
-    -------
-        None
-
-    """
     Rx_tau = []
     for i in range(tau):
         Rx_tau.append(autocorrelation_matrix(X, lag=i))
@@ -79,22 +48,6 @@ def create_autocorrelation_tensor(X: torch.Tensor, tau: int):
     return Rx_autocorr
 
 def create_cov_tensor(X: torch.Tensor):
-    """
-    Creates a 3D tensor of size (NxNx3) containing the real part, imaginary part, and phase component of the covariance matrix.
-
-    Args:
-    -----
-        X (torch.Tensor): Observation matrix input with size (N, T).
-
-    Returns:
-    --------
-        Rx_tensor (torch.Tensor): Tensor containing the auto-correlation matrices, with size (Batch size, N, N, 3).
-
-    Raises:
-    -------
-        None
-
-    """
     Rx = torch.cov(X)
     Rx_tensor = torch.stack((torch.real(Rx), torch.imag(Rx), torch.angle(Rx)), 2)
     return Rx_tensor

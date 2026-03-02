@@ -2,21 +2,52 @@ import random
 import re
 import sys
 sys.path.append('../')
-from DeepMucis_plus.utlis.util import filter_folders, downsample_audio, normalize_magnitude, normalize_phase, \
-    ModeVector_torch,array_aug,load_dataframe, load_numpy
+from dataset.data_loader import load_dataframe, load_numpy
+from utlis.util import filter_folders, downsample_audio, normalize_magnitude, normalize_phase, \
+    ModeVector_torch, doa_xy_deg_from_xyz, load_gt_dict, stem, CalibFromMat, parse_gt_xyz, doa_xz_deg_from_xyz_cav3d
 from torch.utils.data import Dataset
 import torchvision.transforms as Trans
 import torch
 import matplotlib.pyplot as plt
 import librosa
-from DeepMucis_plus.dataset.data_augmentation import add_gaussian_noise
+from dataset.data_augmentation import add_gaussian_noise
 import pysensing.acoustic.preprocessing.transform as transform
 import torch.utils.data as data
 import os
 import re
+from pathlib import Path
 import numpy as np
 import random
 
+
+class Grid:
+    def __init__(self):
+        self.x = np.load('/utlis/grid_x.npy')
+        self.y = np.load('/utlis/grid_y.npy')
+        self.z = np.load('/utlis/grid_z.npy')
+
+def array_aug(mic_offsets,locs,transform,interval=None,mic_center=np.array([[3, 3, 1]])):
+    if transform:
+        if interval == None:
+            random_integer = random.randint(0, 360)
+        else:
+            random_integer = random.randint(0,int(360/interval))*interval
+    else:
+        random_integer = 0
+    grid = Grid()
+    rotation_degree = random_integer
+    theta = np.deg2rad(rotation_degree)
+    R = np.array([
+        [np.cos(theta), -np.sin(theta), 0],
+        [np.sin(theta), np.cos(theta),  0],
+        [0,             0,              1]
+    ])
+    rotated_offsets = mic_offsets @ R.T
+    mic_locs_rotated = mic_center + rotated_offsets
+    mic_positions = mic_locs_rotated.T
+    steer_vector_calc = ModeVector_torch(torch.tensor(mic_positions), 16000, 512, 343, grid, "far", precompute=True)
+    sv = steer_vector_calc.mode_vec
+    return sv,(locs+rotation_degree)%360
 
 class BaseAudioDataset(Dataset):
     def __init__(self, mic_offsets, feature='spectrogram', noise_aug=False, transform_flag=True):
@@ -48,7 +79,6 @@ class BaseAudioDataset(Dataset):
 
     def __getitem__(self, index):
         raise NotImplementedError
-
 
 class DAMUSIC_Loader(BaseAudioDataset):
     def __init__(self, root, mic_offsets, subset='train', coherent=2, num_source=1,
@@ -110,7 +140,6 @@ class DAMUSIC_Loader(BaseAudioDataset):
             return self.spectrogram_process(audio_data), doas, sv
         return audio_data, doas, sv
 
-
 class SoClas_database(BaseAudioDataset):
     def __init__(self, root, mic_offsets, subset='train', noise_aug=False, feature='spectrogram', num_percent=1):
         super().__init__(mic_offsets, feature, noise_aug, subset == 'train')
@@ -135,7 +164,6 @@ class SoClas_database(BaseAudioDataset):
             return self.spectrogram_process(audio_data), doas, sv
         return downsample_audio(audio_data, 1600) if self.feature == 'raw' else audio_data, doas, sv
 
-
 class AFPILD_raw_Dataset(BaseAudioDataset):
     def __init__(self, dataset_dir, mic_offsets, data_type='train', covariant_type='cloth', data_transform='stft', noise_aug=False, num_percent=1):
         super().__init__(mic_offsets, data_transform, noise_aug, data_type == 'train')
@@ -154,7 +182,6 @@ class AFPILD_raw_Dataset(BaseAudioDataset):
         if self.feature != 'raw':
             return self.spectrogram_process(torch.tensor(audio)), doas, sv
         return torch.tensor(audio), doas, sv
-
 
 class BasePretrainDataset(Dataset):
     def __init__(self, feature='spectrogram', noise_aug=False):
@@ -207,7 +234,6 @@ class BasePretrainDataset(Dataset):
         masked, mask = self.apply_mic_masking(spec_orig.clone())
         return masked, spec_orig[:2], mask
 
-
 class DAMUSIC_Loader_pretrain(BasePretrainDataset):
     def __init__(self, root, subset="train", coherent=2, num_source=1, 
                  feature='spectrogram', noise_aug=False):
@@ -233,7 +259,6 @@ class DAMUSIC_Loader_pretrain(BasePretrainDataset):
             return self.spectrogram_process(audio_data)
         return audio_data
 
-
 class SoClas_database_pretrain(BasePretrainDataset):
     def __init__(self, root, subset='train', feature='spectrogram', noise_aug=False):
         super().__init__(feature, noise_aug)
@@ -253,7 +278,6 @@ class SoClas_database_pretrain(BasePretrainDataset):
             return self.spectrogram_process(audio_data)
         return downsample_audio(audio_data, 1600) if self.feature == 'raw' else audio_data
 
-
 class AFPILD_raw_Dataset_pretrain(BasePretrainDataset):
     def __init__(self, dataset_dir, data_type='train', covariant_type='cloth', data_transform='stft', noise_aug=False):
         super().__init__(data_transform, noise_aug)
@@ -266,6 +290,148 @@ class AFPILD_raw_Dataset_pretrain(BasePretrainDataset):
         if self.noise_aug:
             audio_data = self.noise_aug_algo(audio_data)
         return self.spectrogram_process(torch.tensor(audio_data))
+
+class AV16_Dataset(BaseAudioDataset):
+    def __init__(
+        self,
+        processed_root,
+        mic_offsets,
+        subset='train',
+        noise_aug=False,
+        feature='spectrogram',
+        num_percent=1.0,
+        cam=1,
+    ):
+        super().__init__(
+            mic_offsets=mic_offsets,
+            feature=feature,
+            noise_aug=noise_aug,
+            transform_flag=(subset == 'train')
+        )
+
+        self.root = Path(processed_root)
+        self.subset = subset
+        self.num_percent = num_percent
+        self.cam = cam
+
+        if not self.root.exists():
+            raise FileNotFoundError(self.root)
+
+        self.audio_data = []  # (audio_path, gt_path)
+
+        for seq_dir in sorted(self.root.iterdir()):
+            if not seq_dir.is_dir():
+                continue
+
+            audio_dir = seq_dir / "audio"
+            gt_dir = seq_dir / "gt"
+
+            if not (audio_dir.exists() and gt_dir.exists()):
+                continue
+
+            audio_files = sorted(audio_dir.glob("*.npy"))
+            audio_files = audio_files[:int(len(audio_files) * self.num_percent)]
+
+            for ap in audio_files:
+                gp = gt_dir / f"{ap.stem}.npy"
+                if gp.exists():
+                    self.audio_data.append((ap, gp))
+
+        if not self.audio_data:
+            raise RuntimeError(f"No AV16 samples found in {self.root}")
+
+        print(f"[AV16] Indexed {len(self.audio_data)} samples.")
+
+    def extract_degree_numbers(self, file_path):
+        raise NotImplementedError("AV16 uses gt3d_xyz instead of filename DOA")
+
+    def __getitem__(self, index):
+        ap, gp = self.audio_data[index]
+
+        # -------- Load audio --------
+        audio = torch.from_numpy(np.load(str(ap)).astype(np.float32))
+
+        if self.noise_aug:
+            audio = self.noise_aug_algo(audio)
+
+        # -------- Load GT --------
+        gt = load_gt_dict(gp)
+        xyz = np.asarray(gt["gt3d_xyz"], dtype=np.float32)
+        loc_theta_deg = np.array(doa_xy_deg_from_xyz(xyz))
+        doas = torch.tensor(loc_theta_deg, dtype=torch.float32)
+
+        # -------- Array Aug --------
+        sv, doas = array_aug(
+            self.mic_offsets,
+            doas,
+            self.transform,
+            mic_center=np.array([0.0, 0.0, 0.0])
+        )
+
+        if self.feature != "raw":
+            spectrogram = self.spectrogram_process(audio)
+            return spectrogram, doas, sv
+
+        return audio, doas, sv
+
+class AV16_Dataset_pretrain(BasePretrainDataset):
+    def __init__(
+        self,
+        processed_root,
+        subset='train',
+        noise_aug=False,
+        feature='spectrogram',
+        num_percent=1.0,
+        cam=1,
+    ):
+        super().__init__(feature=feature, noise_aug=noise_aug)
+
+        self.root = Path(processed_root)
+        self.subset = subset
+        self.num_percent = num_percent
+        self.cam = cam
+
+        if not self.root.exists():
+            raise FileNotFoundError(self.root)
+
+        self.audio_data = []
+
+        for seq_dir in sorted(self.root.iterdir()):
+            if not seq_dir.is_dir():
+                continue
+
+            audio_dir = seq_dir / "audio"
+            gt_dir = seq_dir / "gt"
+
+            if not (audio_dir.exists() and gt_dir.exists()):
+                continue
+
+            audio_files = sorted(audio_dir.glob("*.npy"))
+            audio_files = audio_files[:int(len(audio_files) * self.num_percent)]
+
+            for ap in audio_files:
+                gp = gt_dir / f"{ap.stem}.npy"
+                if gp.exists():
+                    self.audio_data.append(ap)
+
+        if not self.audio_data:
+            raise RuntimeError(f"No AV16 samples found in {self.root}")
+
+        print(f"[AV16-Pretrain] Indexed {len(self.audio_data)} samples.")
+
+    def __getitem__(self, index):
+        audio = torch.from_numpy(
+            np.load(str(self.audio_data[index])).astype(np.float32)
+        )
+
+        if self.noise_aug:
+            audio = self.noise_aug_algo(audio)
+
+        if self.feature != "raw":
+            return self.spectrogram_process(audio)
+
+        return audio
+
 
 
 if __name__ == "__main__":
