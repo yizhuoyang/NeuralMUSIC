@@ -10,6 +10,19 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass
 from pathlib import Path
 import scipy.io as sio
+import pandas as pd
+
+def load_dataframe(path):
+    df = pd.read_csv(path)
+    return df.to_dict('records')
+
+def load_numpy(path):
+    try:
+        data = np.load(path)
+    except Exception as e:
+        print(e)
+        return None
+    return data
 
 @dataclass
 class CalibFromMat:

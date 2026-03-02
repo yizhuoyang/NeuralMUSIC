@@ -79,7 +79,7 @@ def data_generation(num_source,dataset,fs = 16000,max_order_ub = 4,r_lb=0.5,r_ub
                 np.save(os.path.join(save_dir,f"degree_{doa_list[0]}-{doa_list[1]}-{doa_list[2]}_times{k}"),signals)
 
 if __name__ == "__main__":
-    dataset = pra.datasets.GoogleSpeechCommands(basedir='/home/kemove/yyz/SubspaceNet/pyroom/pyroomacoustics/examples/google_speech_commands')
+    dataset = pra.datasets.GoogleSpeechCommands(basedir='/examples/google_speech_commands',download=True)
     selected_word = 'yes'
     matches = dataset.filter(word=selected_word)
     print(matches)

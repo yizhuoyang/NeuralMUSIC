@@ -2,9 +2,8 @@ import random
 import re
 import sys
 sys.path.append('../')
-from dataset.data_loader import load_dataframe, load_numpy
 from utlis.util import filter_folders, downsample_audio, normalize_magnitude, normalize_phase, \
-    ModeVector_torch, doa_xy_deg_from_xyz, load_gt_dict, stem, CalibFromMat, parse_gt_xyz, doa_xz_deg_from_xyz_cav3d
+    ModeVector_torch, doa_xy_deg_from_xyz, load_gt_dict, stem, CalibFromMat, parse_gt_xyz, doa_xz_deg_from_xyz_cav3d,load_dataframe,load_numpy
 from torch.utils.data import Dataset
 import torchvision.transforms as Trans
 import torch
@@ -22,9 +21,9 @@ import random
 
 class Grid:
     def __init__(self):
-        self.x = np.load('/utlis/grid_x.npy')
-        self.y = np.load('/utlis/grid_y.npy')
-        self.z = np.load('/utlis/grid_z.npy')
+        self.x = np.load('./utlis/grid_x.npy')
+        self.y = np.load('./utlis/grid_y.npy')
+        self.z = np.load('./utlis/grid_z.npy')
 
 def array_aug(mic_offsets,locs,transform,interval=None,mic_center=np.array([[3, 3, 1]])):
     if transform:
@@ -344,6 +343,9 @@ class AV16_Dataset(BaseAudioDataset):
 
     def extract_degree_numbers(self, file_path):
         raise NotImplementedError("AV16 uses gt3d_xyz instead of filename DOA")
+    
+    def __len__(self):
+        return len(self.audio_data)
 
     def __getitem__(self, index):
         ap, gp = self.audio_data[index]

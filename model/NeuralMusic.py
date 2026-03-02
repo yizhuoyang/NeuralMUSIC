@@ -1,297 +1,335 @@
-from __future__ import annotations
-
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import warnings
+import time
 import sys
+
+from torch.nn import MultiheadAttention
+
 sys.path.append("../")
-from utlis.util import ModeVector_torch  # SteeringVector unused in your snippet
+from utlis.util import SteeringVector, ModeVector_torch
+import torch.nn.functional as F
 
-
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-def hermitianize(R: torch.Tensor) -> torch.Tensor:
-    return 0.5 * (R + R.transpose(-1, -2).conj())
-
-def soft_argmax_peak_refined(
-    spectrum: torch.Tensor,
-    alpha: float = 20.0,
-    top_k: int = 5,
-) -> torch.Tensor:
-    """
-    spectrum: (B, A)
-    returns:  (B,) degrees in [0, 360)
-    """
-    B, A = spectrum.shape
-    # Avoid duplicate 0/360 bin: generate A bins in [0,360)
-    angles = torch.linspace(
-        0.0, 360.0, A + 1,
-        device=spectrum.device,
-        dtype=spectrum.dtype
-    )[:-1]
-
-    k = min(top_k, A)
-    top_idx = torch.topk(spectrum, k=k, dim=-1).indices                # (B,k)
-    top_val = torch.gather(spectrum, dim=-1, index=top_idx)            # (B,k)
-    top_ang = torch.gather(angles.expand(B, -1), dim=-1, index=top_idx)
-
-    w = torch.softmax(alpha * top_val, dim=-1)
-    return (w * top_ang).sum(dim=-1)
-
-class ChannelAttention(nn.Module):
-    def __init__(self, in_channels: int, reduction: int = 16):
-        super().__init__()
-        hidden = max(1, in_channels // reduction)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(in_channels, hidden, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, in_channels, bias=False),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, L)
-        b, c, _ = x.shape
-        y = self.pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1)
-        return x * y
-
-class ConvBlock2d(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, p_drop: float = 0.0):
-        super().__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
-        self.drop = nn.Dropout2d(p_drop) if p_drop > 0 else nn.Identity()
-
-    def forward_feat(self, x: torch.Tensor) -> torch.Tensor:
-        # feature BEFORE pooling (to match your original skip behavior)
-        x = F.relu(self.bn(self.conv(x)), inplace=False)
-        return self.drop(x)
-
-    @staticmethod
-    def pool2(x: torch.Tensor) -> torch.Tensor:
-        return F.max_pool2d(x, kernel_size=2, stride=2)
 
 class Encoder(nn.Module):
-    def __init__(self, input_channel: int = 8, dropout_prob: float = 0.0):
-        super().__init__()
-        self.b1 = ConvBlock2d(input_channel, 64, p_drop=dropout_prob)
-        self.b2 = ConvBlock2d(64, 64, p_drop=dropout_prob)
-        self.b3 = ConvBlock2d(64, 64, p_drop=dropout_prob)
-        self.b4 = ConvBlock2d(64, 257, p_drop=dropout_prob)
+    def __init__(self, input_channel=8,dropout_prob=0.3):  # Add dropout_prob to control
+        super(Encoder, self).__init__()
+        self.conv1 = nn.Conv2d(input_channel, 64, kernel_size=3, padding=1)#16
+        self.bn1 = nn.BatchNorm2d(64)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-    def forward(self, x: torch.Tensor):
-        s1 = self.b1.forward_feat(x)
-        x = self.b1.pool2(s1)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1) #32
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        s2 = self.b2.forward_feat(x)
-        x = self.b2.pool2(s2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(64)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        s3 = self.b3.forward_feat(x)
-        x = self.b3.pool2(s3)
+        self.conv4 = nn.Conv2d(64, 257, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm2d(257)
+        self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        s4 = self.b4.forward_feat(x)
-        x = self.b4.pool2(s4)
+        self.dropout = nn.Dropout2d(p=dropout_prob)  # Dropout2D for feature maps
 
-        return x, [s1, s2, s3, s4]
+    def forward(self, x):
+        skip1 = F.relu(self.bn1(self.conv1(x)))
+        # skip1 = self.dropout(skip1)
+        x = self.pool1(skip1)
+
+        skip2 = F.relu(self.bn2(self.conv2(x)))
+        # skip2 = self.dropout(skip2)
+        x = self.pool2(skip2)
+
+        skip3 = F.relu(self.bn3(self.conv3(x)))
+        # skip3 = self.dropout(skip3)
+        x = self.pool3(skip3)
+
+        skip4 = F.relu(self.bn4(self.conv4(x)))
+        # skip4 = self.dropout(skip4)
+        x = self.pool4(skip4)
+
+        return x, [skip1, skip2, skip3, skip4]
 
 class Encoder_cls(nn.Module):
-    def __init__(self, input_channel: int = 8, dropout_prob: float = 0.0):
-        super().__init__()
-        self.b1 = ConvBlock2d(input_channel, 16, p_drop=dropout_prob)
-        self.b2 = ConvBlock2d(16, 16, p_drop=dropout_prob)
-        self.b3 = ConvBlock2d(16, 16, p_drop=dropout_prob)
-        self.b4 = ConvBlock2d(16, 32, p_drop=dropout_prob)
+    def __init__(self, dropout_prob=0.1,input_channel=8):  # Add dropout_prob to control
+        super(Encoder_cls, self).__init__()
+        self.conv1 = nn.Conv2d(input_channel, 16, kernel_size=3, padding=1)#16
+        self.bn1 = nn.BatchNorm2d(16)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.b1.pool2(self.b1.forward_feat(x))
-        x = self.b2.pool2(self.b2.forward_feat(x))
-        x = self.b3.pool2(self.b3.forward_feat(x))
-        x = self.b4.pool2(self.b4.forward_feat(x))
+        self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1) #32
+        self.bn2 = nn.BatchNorm2d(16)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.conv3 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(16)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.conv4 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm2d(32)
+        self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.dropout = nn.Dropout2d(p=dropout_prob)  # Dropout2D for feature maps
+
+    def forward(self, x):
+        skip1 = F.relu(self.bn1(self.conv1(x)))
+        # skip1 = self.dropout(skip1)
+        x = self.pool1(skip1)
+
+        skip2 = F.relu(self.bn2(self.conv2(x)))
+        # skip2 = self.dropout(skip2)
+        x = self.pool2(skip2)
+
+        skip3 = F.relu(self.bn3(self.conv3(x)))
+        # skip3 = self.dropout(skip3)
+        x = self.pool3(skip3)
+
+        skip4 = F.relu(self.bn4(self.conv4(x)))
+        # skip4 = self.dropout(skip4)
+        x = self.pool4(skip4)
+
         return x
 
 class Decoder(nn.Module):
     def __init__(self):
-        super().__init__()
-        self.up1 = nn.Sequential(
-            nn.ConvTranspose2d(257, 128, kernel_size=2, stride=2),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-        )
-        self.c1 = nn.Sequential(
-            nn.Conv2d(128 + 257, 128, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-        )
+        super(Decoder, self).__init__()
+        self.up1 = nn.ConvTranspose2d(257, 128, kernel_size=2, stride=2)
+        self.bn_up1 = nn.BatchNorm2d(128)  # Batch Norm
+        self.conv1 = nn.Conv2d(128 + 257, 128, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(128)  # Batch Norm
 
-        self.up2 = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
-        self.c2 = nn.Sequential(
-            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.bn_up2 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
 
-        self.up3 = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
-        self.c3 = nn.Sequential(
-            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
+        self.up3 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        self.bn_up3 = nn.BatchNorm2d(64)
+        self.conv3 = nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(64)
 
-        self.up4 = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
-        self.c4 = nn.Sequential(
-            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
+        self.up4 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
+        self.bn_up4 = nn.BatchNorm2d(64)
+        self.conv4 = nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm2d(64)
 
         self.final_conv = nn.Conv2d(64, 2, kernel_size=3, padding=1)
 
-    def forward(self, x: torch.Tensor, skips):
-        x = self.up1(x)
-        x = self.c1(torch.cat([x, skips[3]], dim=1))
+    def forward(self, x, skips):
+        x = self.bn_up1(self.up1(x))
+        x = torch.cat([x, skips[3]], dim=1)
+        x = F.relu(self.bn1(self.conv1(x)))
 
-        x = self.up2(x)
-        x = self.c2(torch.cat([x, skips[2]], dim=1))
+        x = self.bn_up2(self.up2(x))
+        x = torch.cat([x, skips[2]], dim=1)
+        x = F.relu(self.bn2(self.conv2(x)))
 
-        x = self.up3(x)
-        x = self.c3(torch.cat([x, skips[1]], dim=1))
+        x = self.bn_up3(self.up3(x))
+        x = torch.cat([x, skips[1]], dim=1)
+        x = F.relu(self.bn3(self.conv3(x)))
 
-        x = self.up4(x)
+        x = self.bn_up4(self.up4(x))
         x = F.interpolate(x, size=skips[0].shape[2:], mode="bilinear", align_corners=False)
-        x = self.c4(torch.cat([x, skips[0]], dim=1))
+        x = torch.cat([x, skips[0]], dim=1)
+        x = F.relu(self.bn4(self.conv4(x)))
 
-        return self.final_conv(x)
+        x = self.final_conv(x)
+        return x
 
 class Autoencoder(nn.Module):
-    def __init__(self, input_channel: int = 8):
-        super().__init__()
-        self.encoder = Encoder(input_channel=input_channel)
+    def __init__(self):
+        super(Autoencoder, self).__init__()
+        self.encoder = Encoder()
         self.decoder = Decoder()
 
-    def forward(self, x: torch.Tensor):
-        z, skips = self.encoder(x)
-        return self.decoder(z, skips)
+    def forward(self, x):
+        x, skips = self.encoder(x)
+        x = self.decoder(x, skips)
+        return x
 
-class NeuralMusic_pretrain(nn.Module):
-    def __init__(self, input_channel: int = 8):
-        super().__init__()
+class Grid:
+    def __init__(self):
+        self.x = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_x.npy')
+        self.y = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_y.npy')
+        self.z = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_z.npy')
+        
+def soft_argmax_peak_refined(spectrum, alpha=20.0, top_k=5):
+    batch_size, num_angles = spectrum.shape
+    angles = torch.linspace(0, 360, spectrum.shape[-1], device=spectrum.device)
+    top_indices = torch.topk(spectrum, k=top_k, dim=-1).indices
+    top_spectrums = torch.gather(spectrum, dim=-1, index=top_indices)
+    top_angles = torch.gather(angles.expand(batch_size, -1), dim=-1, index=top_indices)
+    weights = torch.softmax(alpha * top_spectrums, dim=-1)
+    doa_estimation = torch.sum(weights * top_angles, dim=-1)
+    return doa_estimation
+
+
+class DeepMusic_pretrain(nn.Module):
+    def __init__(self,input_channel=8):
+        super(DeepMusic_pretrain, self).__init__()
         self.encoder = Encoder(input_channel=input_channel)
         self.decoder = Decoder()
-
     def forward(self, x: torch.Tensor):
-        z, skips = self.encoder(x)
-        return self.decoder(z, skips)
+        x, skips = self.encoder(x)
+        x = self.decoder(x, skips)
+        return x
 
+class ChannelAttention(nn.Module):
+    def __init__(self, in_channels, reduction=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(in_channels, in_channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_channels // reduction, in_channels, bias=False),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1)
+        return x * y.expand_as(x)
+
+
+def hermitianize(R: torch.Tensor) -> torch.Tensor:
+    # (..,M,M) complex
+    return (R + R.transpose(-1, -2).conj()) / 2
+
+
+# -----------------------------------------
+# DeepMusic_plus (Unified)
+# -----------------------------------------
 class NeuralMusic(nn.Module):
+    """
+    Unified DeepMusic:
+      - predict_source=False : fixed #sources = M_fixed (original DeepMusic_plus)
+      - predict_source=True  : predict #sources (original DeepMusic_plus_class behavior)
+
+    Forward I/O:
+      X:  (B,C,F,T)
+      sv: (B,F,A,M) or (B,F,M,A)  <-- both supported
+      correlation: unused, kept for compatibility
+
+    Returns:
+      - predict_source=False : (DOA, spectrum)
+      - predict_source=True  : (DOA, spectrum, num_source_logits)
+        (you can also return M_hat if you want)
+    """
+
     def __init__(
         self,
         N,
         T,
         M,
         device,
-        attention: bool = True,
-        input_channel: int = 8,
-        eps: float = 1e-6,
-        predict_num_sources: bool = False,
-        max_sources: int | None = None,   # optional: override N for classification head output dim
+        attention=True,
+        input_channel=8,
+        predict_source=False,
+        eps=1e-6,
+        diag_eps=1e-5,
     ):
         super().__init__()
         self.N, self.T = N, T
-        self.M_fixed = M                 # fixed source count (if not predicting)
-        self.input_channel = input_channel
+        self.M_fixed = M
         self.device = device
-        self.eps = eps
+        self.input_channel = int(input_channel)
 
-        self.predict_num_sources = predict_num_sources
-        self.max_sources = int(max_sources) if max_sources is not None else int(N)
+        self.predict_source = bool(predict_source)
+        self.attention = bool(attention)
 
-        # Rx estimator encoder
-        self.encoder = Encoder(input_channel=input_channel)
+        self.eps = float(eps)
+        self.diag_eps = float(diag_eps)
 
-        # optional source-count classifier encoder
-        if self.predict_num_sources:
-            self.encoder_class = Encoder_cls(input_channel=input_channel)
+        # ----- Encoders -----
+        self.encoder = Encoder(input_channel=self.input_channel)
+
+        if self.predict_source:
+            self.encoder_class = Encoder_cls(input_channel=self.input_channel)
             self.source_prediction1 = nn.Linear(64 * 32, 128)
-            self.source_prediction2 = nn.Linear(128, self.max_sources)
+            self.source_prediction2 = nn.Linear(128, self.N)
 
-        self.act = nn.LeakyReLU(0.1, inplace=True)
-        self.sigmoid = nn.Sigmoid()
+        # ----- Rx head -----
+        self.fc = nn.Linear(64, int(self.input_channel * self.input_channel / 2))
 
-        # After encoder output: (B,257,H,W) -> flatten HW -> FC -> (input_channel^2/2)
-        self.fc = nn.Linear(64, int(input_channel * input_channel / 2))
-
-        # spectrum head: (B,257,A) -> (B,257,A) -> (B,1,A)
+        # ----- Spectrum head -----
         self.convs2 = nn.Conv1d(257, 257, kernel_size=3, padding=1)
         self.convs1 = nn.Conv1d(257, 1, kernel_size=3, padding=1)
 
-        # attention option
-        self.attention = attention
+        self.relu = nn.LeakyReLU(0.1, inplace=True)
+        self.sigmoid = nn.Sigmoid()
+
+        # optional channel attention for (B,257,A)
         self.channel_attention = ChannelAttention(in_channels=257, reduction=16)
 
+    # -------------------------
+    # sv layout adapter
+    # -------------------------
+    @staticmethod
+    def _ensure_sv_layout(sv: torch.Tensor, M: int) -> torch.Tensor:
+        """
+        Ensure sv is (B,F,A,M). Accepts:
+          - (B,F,A,M) : ok
+          - (B,F,M,A) : permute -> (B,F,A,M)
+        """
+        if sv.dim() != 4:
+            raise ValueError(f"sv must be 4-D, got shape={tuple(sv.shape)}")
+
+        if sv.shape[-1] == M:
+            # (B,F,A,M)
+            return sv
+        if sv.shape[-2] == M:
+            # (B,F,M,A) -> (B,F,A,M)
+            return sv.permute(0, 1, 3, 2).contiguous()
+
+        raise ValueError(f"Cannot infer sv layout with M={M}. sv shape={tuple(sv.shape)}")
+
+    # -------------------------
+    # spectrum computation
+    # -------------------------
     @staticmethod
     def _spectrum_from_Un(Un: torch.Tensor, sv: torch.Tensor, eps: float) -> torch.Tensor:
         """
-        Un: (B,F,M,M-d) noise subspace
-        sv: (B,F,A,M)   steering vectors
+        Un: (B,F,M,K) noise subspace
+        sv: (B,F,A,M) or (B,F,M,A)
         return: (B,F,A)
         """
-        UnUnH = Un @ Un.transpose(-2, -1).conj()      # (B,F,M,M)
+        B, F, M, K = Un.shape
+        sv = NeuralMusic._ensure_sv_layout(sv, M).to(dtype=Un.dtype, device=Un.device)  # -> (B,F,A,M)
 
-        sv = sv.to(device=Un.device, dtype=Un.dtype)  # (B,F,A,M)
-        svH = sv.transpose(-2, -1).conj()             # (B,F,M,A)
+        # UnUnH: (B,F,M,M)
+        UnUnH = Un @ Un.transpose(-2, -1).conj()
 
-        # denom[a] = sv[a]^H UnUnH sv[a]
-        tmp = UnUnH @ sv.transpose(-2, -1).conj()     # (B,F,M,M)@(B,F,M,A) -> (B,F,M,A)
-        denom = (svH * tmp).sum(dim=-2).real          # sum over M -> (B,F,A)
+        # v = UnUnH @ sv (along M) -> (B,F,A,M)
+        v = torch.einsum("bfmn,bfam->bfan", UnUnH, sv)
 
+        # denom[a] = sv[a]^H v[a] -> (B,F,A)
+        denom = torch.einsum("bfam,bfam->bfa", sv.conj(), v).real
         denom = denom.clamp_min(eps)
         return 1.0 / denom
 
     def _pre_music_fixedM(self, Rz: torch.Tensor, sv: torch.Tensor, M_use: int) -> torch.Tensor:
         """
-        Rz: (B,F,M,M) complex covariance
-        sv: (B,F,A,M)
-        M_use: fixed integer
+        Rz: (B,F,M,M) complex
+        sv: (B,F,A,M) or (B,F,M,A)
         """
         Rz = hermitianize(Rz)
-        eye = torch.eye(
-            Rz.size(-1), device=Rz.device, dtype=Rz.dtype
-        ).view(1, 1, Rz.size(-1), Rz.size(-1))
-        Rz = Rz + 1e-5 * eye
+        eye = torch.eye(Rz.size(-1), device=Rz.device, dtype=Rz.dtype).view(1, 1, Rz.size(-1), Rz.size(-1))
+        Rz = Rz + self.diag_eps * eye
 
-        _, evecs = torch.linalg.eigh(Rz)
-        evecs = torch.flip(evecs, dims=[-1])          # descending
-        Un = evecs[..., M_use:]                       # (B,F,M,M-M_use)
+        _, evecs = torch.linalg.eigh(Rz)      # ascending
+        evecs = torch.flip(evecs, dims=[-1])  # descending
+        Un = evecs[..., M_use:]               # (B,F,M,M-M_use)
         return self._spectrum_from_Un(Un, sv, self.eps)
 
     def _pre_music_varM(self, Rz: torch.Tensor, sv: torch.Tensor, M_per_batch: torch.Tensor) -> torch.Tensor:
         """
-        Variable number of sources per sample (loop per batch).
-        Rz: (B,F,M,M)
-        sv: (B,F,A,M)
-        M_per_batch: (B,)
+        Variable M per sample, matches your original loop style.
         """
         Rz = hermitianize(Rz)
-        eye = torch.eye(
-            Rz.size(-1), device=Rz.device, dtype=Rz.dtype
-        ).view(1, 1, Rz.size(-1), Rz.size(-1))
-        Rz = Rz + 1e-5 * eye
+        eye = torch.eye(Rz.size(-1), device=Rz.device, dtype=Rz.dtype).view(1, 1, Rz.size(-1), Rz.size(-1))
+        Rz = Rz + self.diag_eps * eye
 
         _, evecs = torch.linalg.eigh(Rz)
         evecs = torch.flip(evecs, dims=[-1])
@@ -300,56 +338,74 @@ class NeuralMusic(nn.Module):
         B = Rz.size(0)
         for b in range(B):
             m_b = int(M_per_batch[b].item())
-            Un_b = evecs[b, :, :, m_b:]               # (F,M,M-m_b)
-            spec_b = self._spectrum_from_Un(
-                Un_b.unsqueeze(0), sv[b:b+1], self.eps
-            ).squeeze(0)
+            Un_b = evecs[b, :, :, m_b:]  # (F,M,M-m_b)
+            spec_b = self._spectrum_from_Un(Un_b.unsqueeze(0), sv[b:b+1], self.eps).squeeze(0)
             spectra.append(spec_b)
-        return torch.stack(spectra, dim=0)            # (B,F,A)
+        return torch.stack(spectra, dim=0)  # (B,F,A)
 
-    def forward(self, X: torch.Tensor, sv: torch.Tensor, correlation: torch.Tensor):
+    # -------------------------
+    # Rx estimation
+    # -------------------------
+    def _estimate_Rz(self, X: torch.Tensor) -> torch.Tensor:
         """
-        X: (B,C,F,T)
-        sv: (B,F,A,M)
-        correlation: kept for signature compatibility (currently unused)
-
-        returns:
-          - predict_num_sources=False: doa, spectrum
-          - predict_num_sources=True : doa, spectrum, ns, M_hat
+        X -> encoder -> fc -> reshape -> complex Rz
+        Output shape:
+          z from encoder: (B,257,h,w)
+          z after fc:     (B,257,input_channel^2/2)
+          reshape:        (B,257,input_channel/2,input_channel)
+          chunk:          (B,257,input_channel/2,input_channel/2) twice
+        If input_channel == 2*M_mic, then Rz is (B,257,M_mic,M_mic)
         """
-        # -------- (optional) predict number of sources --------
-        ns = None
-        M_hat = None
-        if self.predict_num_sources:
-            ns_feat = self.encoder_class(X)           # (B,32,?,?)
-            ns_feat = ns_feat.view(ns_feat.size(0), -1)
-            ns_feat = self.act(self.source_prediction1(ns_feat))
-            ns = self.source_prediction2(ns_feat)     # (B, max_sources)
-            M_hat = torch.argmax(ns, dim=1)           # (B,)
-
-        # -------- estimate Rx from encoder --------
         z, _ = self.encoder(X)                        # (B,257,h,w)
-        z = z.flatten(2)                              # (B,257,h*w)
+        z = z.view(z.size(0), z.size(1), -1)          # (B,257,h*w)
         z = self.fc(z)                                # (B,257,input_channel^2/2)
 
         z = z.view(z.size(0), z.size(1), self.input_channel // 2, self.input_channel)
-        Rx_real, Rx_imag = torch.chunk(z, chunks=2, dim=-1)
-        Rz = torch.complex(Rx_real, Rx_imag)          # (B,257,M,M) if input_channel == 2*M
+        Rx_real, Rx_imag = torch.chunk(z, chunks=2, dim=-1)  # split last dim
+        Rz = torch.complex(Rx_real, Rx_imag)                 # (B,257,M,M) when input_channel=2M
+        return Rz
 
-        # -------- MUSIC --------
-        if self.predict_num_sources:
+    # -------------------------
+    # Source-count prediction
+    # -------------------------
+    def _predict_sources(self, X: torch.Tensor):
+        feat = self.encoder_class(X)                  # (B,32,?,?)
+        feat = feat.view(feat.size(0), -1)            # -> (B, 64*32) (your original assumption)
+        feat = self.relu(self.source_prediction1(feat))
+        logits = self.source_prediction2(feat)        # (B,N)
+        M_hat = torch.argmax(logits, dim=1)           # (B,)
+        return logits, M_hat
+
+    # -------------------------
+    # forward
+    # -------------------------
+    def forward(self, X: torch.Tensor, sv: torch.Tensor, correlation=None):
+        """
+        Returns:
+          - predict_source=False : DOA, spectrum
+          - predict_source=True  : DOA, spectrum, num_source_logits
+        """
+        num_source_logits = None
+        M_hat = None
+
+        if self.predict_source:
+            num_source_logits, M_hat = self._predict_sources(X)
+
+        Rz = self._estimate_Rz(X)
+
+        if self.predict_source:
             spectrum = self._pre_music_varM(Rz, sv, M_hat)   # (B,257,A)
         else:
             spectrum = self._pre_music_fixedM(Rz, sv, self.M_fixed)
 
-        # -------- spectrum head --------
-        spectrum = self.act(self.convs2(spectrum))     # (B,257,A)
+        spectrum = self.relu(self.convs2(spectrum))          # (B,257,A)
         if self.attention:
             spectrum = self.channel_attention(spectrum)
 
         spectrum = self.sigmoid(self.convs1(spectrum)).squeeze(1)  # (B,A)
-        doa = soft_argmax_peak_refined(spectrum).unsqueeze(1)      # (B,1)
+        DOA = soft_argmax_peak_refined(spectrum).unsqueeze(1)      # (B,1)
 
-        if self.predict_num_sources:
-            return doa, spectrum, ns, M_hat
-        return doa, spectrum
+        if self.predict_source:
+            # 如果你想额外返回 M_hat：return DOA, spectrum, num_source_logits, M_hat
+            return DOA, spectrum, num_source_logits
+        return DOA, spectrum
