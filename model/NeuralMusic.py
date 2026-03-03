@@ -151,9 +151,9 @@ class Autoencoder(nn.Module):
 
 class Grid:
     def __init__(self):
-        self.x = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_x.npy')
-        self.y = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_y.npy')
-        self.z = np.load('/home/kemove/yyz/SubspaceNet/DeepMucis_plus/grid_z.npy')
+        self.x = np.load('/utlis/grid_x.npy')
+        self.y = np.load('/utlis/grid_y.npy')
+        self.z = np.load('/utlis/grid_z.npy')
         
 def soft_argmax_peak_refined(spectrum, alpha=20.0, top_k=5):
     batch_size, num_angles = spectrum.shape
@@ -165,10 +165,9 @@ def soft_argmax_peak_refined(spectrum, alpha=20.0, top_k=5):
     doa_estimation = torch.sum(weights * top_angles, dim=-1)
     return doa_estimation
 
-
-class DeepMusic_pretrain(nn.Module):
+class NeuralMusic_pretrain(nn.Module):
     def __init__(self,input_channel=8):
-        super(DeepMusic_pretrain, self).__init__()
+        super(NeuralMusic_pretrain, self).__init__()
         self.encoder = Encoder(input_channel=input_channel)
         self.decoder = Decoder()
     def forward(self, x: torch.Tensor):
@@ -198,214 +197,135 @@ def hermitianize(R: torch.Tensor) -> torch.Tensor:
     return (R + R.transpose(-1, -2).conj()) / 2
 
 
-# -----------------------------------------
-# DeepMusic_plus (Unified)
-# -----------------------------------------
-class NeuralMusic(nn.Module):
-    """
-    Unified DeepMusic:
-      - predict_source=False : fixed #sources = M_fixed (original DeepMusic_plus)
-      - predict_source=True  : predict #sources (original DeepMusic_plus_class behavior)
-
-    Forward I/O:
-      X:  (B,C,F,T)
-      sv: (B,F,A,M) or (B,F,M,A)  <-- both supported
-      correlation: unused, kept for compatibility
-
-    Returns:
-      - predict_source=False : (DOA, spectrum)
-      - predict_source=True  : (DOA, spectrum, num_source_logits)
-        (you can also return M_hat if you want)
-    """
-
-    def __init__(
-        self,
-        N,
-        T,
-        M,
-        device,
-        attention=True,
-        input_channel=8,
-        predict_source=False,
-        eps=1e-6,
-        diag_eps=1e-5,
-    ):
-        super().__init__()
-        self.N, self.T = N, T
-        self.M_fixed = M
+class DeepMusic_plus(nn.Module):
+    def __init__(self, N, T, M,device,attention=True,input_channel=8):
+        super(DeepMusic_plus, self).__init__()
+        self.N, self.T, self.M = N, T, M
+        self.input_channel = input_channel
+        self.angels = torch.linspace(-1 * np.pi , np.pi, 360).to(device)
         self.device = device
-        self.input_channel = int(input_channel)
-
-        self.predict_source = bool(predict_source)
-        self.attention = bool(attention)
-
-        self.eps = float(eps)
-        self.diag_eps = float(diag_eps)
-
-        # ----- Encoders -----
-        self.encoder = Encoder(input_channel=self.input_channel)
-
-        if self.predict_source:
-            self.encoder_class = Encoder_cls(input_channel=self.input_channel)
-            self.source_prediction1 = nn.Linear(64 * 32, 128)
-            self.source_prediction2 = nn.Linear(128, self.N)
-
-        # ----- Rx head -----
-        self.fc = nn.Linear(64, int(self.input_channel * self.input_channel / 2))
-
-        # ----- Spectrum head -----
-        self.convs2 = nn.Conv1d(257, 257, kernel_size=3, padding=1)
-        self.convs1 = nn.Conv1d(257, 1, kernel_size=3, padding=1)
-
-        self.relu = nn.LeakyReLU(0.1, inplace=True)
+        self.input_size = self.N
+        self.hidden_size = 2 * self.N
+        self.DropOut = nn.Dropout(0.1)
+        self.autoencoder = Autoencoder()
+        self.encoder = Encoder(input_channel)
+        self.conv2d1 = nn.Conv2d(in_channels=257, out_channels=257, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2d2 = nn.Conv2d(in_channels=257, out_channels=257, kernel_size=3, stride=1, padding=1, bias=False)
+        self.convs2  = nn.Conv1d(in_channels=257, out_channels=257, kernel_size=3, stride=1, padding=1)  # Output: (16, 32, 32)
+        self.convs1  = nn.Conv1d(in_channels=257, out_channels=1, kernel_size=3, stride=1, padding=1)  # Output: (16, 32, 32)
+        self.relu    =  nn.LeakyReLU(0.1)
         self.sigmoid = nn.Sigmoid()
-
-        # optional channel attention for (B,257,A)
+        self.fc = nn.Linear(64,int(input_channel*input_channel/2))
+        self.dropout = nn.Dropout2d(p=0.3)
         self.channel_attention = ChannelAttention(in_channels=257, reduction=16)
+        self.attention = attention
+    def spectrum_calculation(self, Un,sv):
+        batch_size, F, M, _ = Un.shape
+        Un_UnH = torch.matmul(Un, torch.conj(Un).transpose(-2, -1))
+        sv = sv.to(dtype=Un.dtype, device=Un.device)
+        bs,_, num_angles, _ = sv.shape
+        sv_H = torch.conj(sv).transpose(-2, -1)  # [batch_size, F, M, N_angles]
+        denominator_matrix = torch.matmul(sv_H, torch.matmul(Un_UnH, sv))
+        spectrum_eq = denominator_matrix.diagonal(dim1=-2, dim2=-1).real
+        spectrum_eq = spectrum_eq.clamp(min=1e-6)
+        spectrum = 1 / spectrum_eq
+        return spectrum
 
-    # -------------------------
-    # sv layout adapter
-    # -------------------------
-    @staticmethod
-    def _ensure_sv_layout(sv: torch.Tensor, M: int) -> torch.Tensor:
-        """
-        Ensure sv is (B,F,A,M). Accepts:
-          - (B,F,A,M) : ok
-          - (B,F,M,A) : permute -> (B,F,A,M)
-        """
-        if sv.dim() != 4:
-            raise ValueError(f"sv must be 4-D, got shape={tuple(sv.shape)}")
+    def pre_MUSIC(self,Rz,sv):
+        Rz = (Rz + Rz.transpose(-1, -2).conj()) / 2
+        Rz = Rz + 1e-5 * torch.eye(Rz.shape[-1], device=Rz.device)
+        eigenvalues, eigenvectors = torch.linalg.eigh(Rz)
+        eigenvectors = torch.flip(eigenvectors, dims=[-1])
+        Un = eigenvectors[:, :, :, self.M:]
+        return self.spectrum_calculation(Un,sv)
 
-        if sv.shape[-1] == M:
-            # (B,F,A,M)
-            return sv
-        if sv.shape[-2] == M:
-            # (B,F,M,A) -> (B,F,A,M)
-            return sv.permute(0, 1, 3, 2).contiguous()
-
-        raise ValueError(f"Cannot infer sv layout with M={M}. sv shape={tuple(sv.shape)}")
-
-    # -------------------------
-    # spectrum computation
-    # -------------------------
-    @staticmethod
-    def _spectrum_from_Un(Un: torch.Tensor, sv: torch.Tensor, eps: float) -> torch.Tensor:
-        """
-        Un: (B,F,M,K) noise subspace
-        sv: (B,F,A,M) or (B,F,M,A)
-        return: (B,F,A)
-        """
-        B, F, M, K = Un.shape
-        sv = NeuralMusic._ensure_sv_layout(sv, M).to(dtype=Un.dtype, device=Un.device)  # -> (B,F,A,M)
-
-        # UnUnH: (B,F,M,M)
-        UnUnH = Un @ Un.transpose(-2, -1).conj()
-
-        # v = UnUnH @ sv (along M) -> (B,F,A,M)
-        v = torch.einsum("bfmn,bfam->bfan", UnUnH, sv)
-
-        # denom[a] = sv[a]^H v[a] -> (B,F,A)
-        denom = torch.einsum("bfam,bfam->bfa", sv.conj(), v).real
-        denom = denom.clamp_min(eps)
-        return 1.0 / denom
-
-    def _pre_music_fixedM(self, Rz: torch.Tensor, sv: torch.Tensor, M_use: int) -> torch.Tensor:
-        """
-        Rz: (B,F,M,M) complex
-        sv: (B,F,A,M) or (B,F,M,A)
-        """
-        Rz = hermitianize(Rz)
-        eye = torch.eye(Rz.size(-1), device=Rz.device, dtype=Rz.dtype).view(1, 1, Rz.size(-1), Rz.size(-1))
-        Rz = Rz + self.diag_eps * eye
-
-        _, evecs = torch.linalg.eigh(Rz)      # ascending
-        evecs = torch.flip(evecs, dims=[-1])  # descending
-        Un = evecs[..., M_use:]               # (B,F,M,M-M_use)
-        return self._spectrum_from_Un(Un, sv, self.eps)
-
-    def _pre_music_varM(self, Rz: torch.Tensor, sv: torch.Tensor, M_per_batch: torch.Tensor) -> torch.Tensor:
-        """
-        Variable M per sample, matches your original loop style.
-        """
-        Rz = hermitianize(Rz)
-        eye = torch.eye(Rz.size(-1), device=Rz.device, dtype=Rz.dtype).view(1, 1, Rz.size(-1), Rz.size(-1))
-        Rz = Rz + self.diag_eps * eye
-
-        _, evecs = torch.linalg.eigh(Rz)
-        evecs = torch.flip(evecs, dims=[-1])
-
-        spectra = []
-        B = Rz.size(0)
-        for b in range(B):
-            m_b = int(M_per_batch[b].item())
-            Un_b = evecs[b, :, :, m_b:]  # (F,M,M-m_b)
-            spec_b = self._spectrum_from_Un(Un_b.unsqueeze(0), sv[b:b+1], self.eps).squeeze(0)
-            spectra.append(spec_b)
-        return torch.stack(spectra, dim=0)  # (B,F,A)
-
-    # -------------------------
-    # Rx estimation
-    # -------------------------
-    def _estimate_Rz(self, X: torch.Tensor) -> torch.Tensor:
-        """
-        X -> encoder -> fc -> reshape -> complex Rz
-        Output shape:
-          z from encoder: (B,257,h,w)
-          z after fc:     (B,257,input_channel^2/2)
-          reshape:        (B,257,input_channel/2,input_channel)
-          chunk:          (B,257,input_channel/2,input_channel/2) twice
-        If input_channel == 2*M_mic, then Rz is (B,257,M_mic,M_mic)
-        """
-        z, _ = self.encoder(X)                        # (B,257,h,w)
-        z = z.view(z.size(0), z.size(1), -1)          # (B,257,h*w)
-        z = self.fc(z)                                # (B,257,input_channel^2/2)
-
-        z = z.view(z.size(0), z.size(1), self.input_channel // 2, self.input_channel)
-        Rx_real, Rx_imag = torch.chunk(z, chunks=2, dim=-1)  # split last dim
-        Rz = torch.complex(Rx_real, Rx_imag)                 # (B,257,M,M) when input_channel=2M
-        return Rz
-
-    # -------------------------
-    # Source-count prediction
-    # -------------------------
-    def _predict_sources(self, X: torch.Tensor):
-        feat = self.encoder_class(X)                  # (B,32,?,?)
-        feat = feat.view(feat.size(0), -1)            # -> (B, 64*32) (your original assumption)
-        feat = self.relu(self.source_prediction1(feat))
-        logits = self.source_prediction2(feat)        # (B,N)
-        M_hat = torch.argmax(logits, dim=1)           # (B,)
-        return logits, M_hat
-
-    # -------------------------
-    # forward
-    # -------------------------
-    def forward(self, X: torch.Tensor, sv: torch.Tensor, correlation=None):
-        """
-        Returns:
-          - predict_source=False : DOA, spectrum
-          - predict_source=True  : DOA, spectrum, num_source_logits
-        """
-        num_source_logits = None
-        M_hat = None
-
-        if self.predict_source:
-            num_source_logits, M_hat = self._predict_sources(X)
-
-        Rz = self._estimate_Rz(X)
-
-        if self.predict_source:
-            spectrum = self._pre_music_varM(Rz, sv, M_hat)   # (B,257,A)
-        else:
-            spectrum = self._pre_music_fixedM(Rz, sv, self.M_fixed)
-
-        spectrum = self.relu(self.convs2(spectrum))          # (B,257,A)
+    def forward(self, X,sv,correlation):
+        self.BATCH_SIZE = X.shape[0]
+        denoised_spec = X
+        x,_ = self.encoder(denoised_spec)
+        x = x.view(x.shape[0], x.shape[1], -1)
+        x = self.fc(x)
+        x = x.view(x.shape[0], x.shape[1], int(self.input_channel/2), self.input_channel)
+        Rx_real, Rx_imag = torch.chunk(x, chunks=2, dim=-1)
+        feature = torch.complex(Rx_real, Rx_imag)
+        spectrum  = self.pre_MUSIC(feature,sv)
+        spectrum = self.relu(self.convs2(spectrum))
+        #use channel attention
         if self.attention:
             spectrum = self.channel_attention(spectrum)
+        spectrum = self.sigmoid(self.convs1(spectrum))
+        spectrum = spectrum.squeeze(1)
+        DOA = soft_argmax_peak_refined(spectrum).unsqueeze(1)
+        return DOA,spectrum
 
-        spectrum = self.sigmoid(self.convs1(spectrum)).squeeze(1)  # (B,A)
-        DOA = soft_argmax_peak_refined(spectrum).unsqueeze(1)      # (B,1)
+class DeepMusic_plus_class(nn.Module):
+    def __init__(self, N, T, M,device,input_channel=8):
+        super(DeepMusic_plus_class, self).__init__()
+        self.N, self.T, self.M = N, T, None
+        self.input_channel = input_channel
+        self.angels = torch.linspace(-1 * np.pi , np.pi, 360).to(device)
+        self.device = device
+        self.input_size = self.N
+        self.hidden_size = 2 * self.N
+        self.DropOut = nn.Dropout(0.1)
+        self.encoder = Encoder(input_channel=input_channel)
+        self.encoder_class = Encoder_cls(input_channel=input_channel)
+        self.convs2  = nn.Conv1d(in_channels=257, out_channels=257, kernel_size=3, stride=1, padding=1)  # Output: (16, 32, 32)
+        self.convs1  = nn.Conv1d(in_channels=257, out_channels=1, kernel_size=3, stride=1, padding=1)  # Output: (16, 32, 32)
+        self.relu    =  nn.LeakyReLU(0.1)
+        self.sigmoid = nn.Sigmoid()
+        self.fc = nn.Linear(64,int(input_channel*input_channel/2))
+        self.dropout = nn.Dropout2d(p=0.3)
+        self.channel_attention = ChannelAttention(in_channels=257, reduction=16)
+        self.source_prediction1 = nn.Linear(64*32,128)
+        self.source_prediction2 = nn.Linear(128,self.N)
 
-        if self.predict_source:
-            # 如果你想额外返回 M_hat：return DOA, spectrum, num_source_logits, M_hat
-            return DOA, spectrum, num_source_logits
-        return DOA, spectrum
+    def spectrum_calculation(self, Un_list, sv):
+        spectra = []
+        for b, Un in enumerate(Un_list):
+            Un_UnH = torch.matmul(Un, torch.conj(Un).transpose(-2, -1))
+            sv_b = sv[b].to(dtype=Un.dtype, device=Un.device)
+            sv_H = torch.conj(sv_b).transpose(-2, -1)  # [batch_size, F, M, N_angles]
+            denominator_matrix = torch.matmul(sv_H, torch.matmul(Un_UnH, sv_b))
+            spectrum_eq = denominator_matrix.diagonal(dim1=-2, dim2=-1).real
+            spectrum_eq = spectrum_eq.clamp(min=1e-6)
+            spectrum = 1 / spectrum_eq
+            spectra.append(spectrum)
+        return torch.stack(spectra, dim=0)
+
+
+    def pre_MUSIC(self,Rz,sv):
+        Rz = (Rz + Rz.transpose(-1, -2).conj()) / 2
+        Rz = Rz + 1e-5 * torch.eye(Rz.shape[-1], device=Rz.device)
+        eigenvalues, eigenvectors = torch.linalg.eigh(Rz)
+        eigenvectors = torch.flip(eigenvectors, dims=[-1])
+        Un_list = []
+        for b in range(Rz.shape[0]):
+            M_b = self.M[b].item()
+            Un_b = eigenvectors[b, :,:, M_b:]  # shape: [C, C-M]
+            Un_list.append(Un_b)
+        return self.spectrum_calculation(Un_list, sv)
+
+
+    def forward(self, X,sv,correlation):
+        self.BATCH_SIZE = X.shape[0]
+        denoised_spec = X
+        num_source = self.encoder_class(denoised_spec)
+        num_source = num_source.view(num_source.shape[0],-1)
+        num_source = self.relu(self.source_prediction1(num_source))
+        num_source = self.source_prediction2(num_source)
+        self.M     = torch.argmax(num_source, dim=1)
+
+        x,_ = self.encoder(denoised_spec)
+        x = x.view(x.shape[0], x.shape[1], -1)
+        x = self.fc(x)
+        x = x.view(x.shape[0], x.shape[1], int(self.input_channel/2), self.input_channel)
+        Rx_real, Rx_imag = torch.chunk(x, chunks=2, dim=-1)
+        feature = torch.complex(Rx_real, Rx_imag)
+        spectrum  = self.pre_MUSIC(feature,sv)
+        spectrum = self.relu(self.convs2(spectrum))
+        spectrum = self.channel_attention(spectrum)
+        spectrum = self.sigmoid(self.convs1(spectrum))
+        spectrum = spectrum.squeeze(1)
+        DOA = soft_argmax_peak_refined(spectrum).unsqueeze(1)
+        return DOA,spectrum,num_source
