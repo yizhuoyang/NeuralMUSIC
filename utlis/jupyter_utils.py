@@ -685,8 +685,13 @@ def plot_tsne_clusters(
 
     return fig, ax
 
-def plot_tsne_clusters_multi(
-    rx_labels,
+import matplotlib.pyplot as plt
+import numpy as np
+import matplotlib as mpl
+
+
+def plot_tsne_clusters_multi_labels(
+    labels_list,
     tsne_results,
     titles=None,
     ncols=2,
@@ -698,8 +703,31 @@ def plot_tsne_clusters_multi(
     share_axes=False,
     show_legend=False,
     legend_loc="best",
+    color_mode="global",   # "global" or "per_axes"
+    cmap_name="tab20",
     save_path=None,
 ):
+    """
+    Plot multiple t-SNE results in subplots, where each subplot has its own labels.
+
+    Parameters
+    ----------
+    labels_list : list/tuple of array-like
+        labels_list[i] is (Ni,) labels for tsne_results[i].
+    tsne_results : list/tuple of array-like
+        tsne_results[i] is (Ni,2) embedding.
+    titles : list[str] or None
+        Subplot titles.
+    color_mode : str
+        "global": same numeric label uses same color across all subplots.
+        "per_axes": each subplot uses its own colormap assignment.
+
+    Returns
+    -------
+    fig, axes
+    """
+
+    # ---------------- Style ----------------
     try:
         plt.style.use("seaborn-v0_8-whitegrid")
     except:
@@ -713,25 +741,35 @@ def plot_tsne_clusters_multi(
         "DejaVu Sans", "Helvetica", "Liberation Sans",
         "Bitstream Vera Sans", "sans-serif"
     ]
-    mpl.rcParams["font.size"] = 15
+    mpl.rcParams["font.size"] = 30
     mpl.rcParams["axes.linewidth"] = 1.5
     mpl.rcParams["axes.labelsize"] = 14
     mpl.rcParams["axes.titlesize"] = 16
     mpl.rcParams["xtick.labelsize"] = 12
     mpl.rcParams["ytick.labelsize"] = 12
 
-    # ---------------- Data ----------------
-    rx_labels = np.array(rx_labels).squeeze()
+    labels_list = list(labels_list)
     tsne_results = list(tsne_results)
+    if len(labels_list) != len(tsne_results):
+        raise ValueError(f"labels_list length ({len(labels_list)}) != tsne_results length ({len(tsne_results)})")
+
     num_plots = len(tsne_results)
     if num_plots == 0:
-        raise ValueError("tsne_results is empty.")
+        raise ValueError("Empty inputs.")
 
-    unique_labels = sorted(np.unique(rx_labels))
+    # ---------------- Global color map (optional) ----------------
+    cmap = plt.get_cmap(cmap_name)
 
-    # Consistent label->color mapping across all subplots
-    cmap = plt.get_cmap("tab20")  # robust for many labels
-    color_map = {lab: cmap(i % cmap.N) for i, lab in enumerate(unique_labels)}
+    global_color_map = None
+    if color_mode == "global":
+        all_labels = []
+        for labs in labels_list:
+            labs = np.array(labs).squeeze()
+            all_labels.extend(list(np.unique(labs)))
+        global_unique = sorted(set(all_labels))
+        global_color_map = {lab: cmap(i % cmap.N) for i, lab in enumerate(global_unique)}
+    elif color_mode != "per_axes":
+        raise ValueError("color_mode must be 'global' or 'per_axes'.")
 
     # ---------------- Layout ----------------
     ncols = int(max(1, ncols))
@@ -747,13 +785,12 @@ def plot_tsne_clusters_multi(
         sharey=share_axes,
     )
 
-    # axes to flat list
     if isinstance(axes, np.ndarray):
         axes_flat = axes.ravel()
     else:
         axes_flat = [axes]
 
-    # ---------------- Plot each subplot ----------------
+    # ---------------- Plot ----------------
     for i in range(nrows * ncols):
         ax = axes_flat[i]
         if i >= num_plots:
@@ -761,16 +798,25 @@ def plot_tsne_clusters_multi(
             continue
 
         emb = np.asarray(tsne_results[i])
-        if emb.ndim != 2 or emb.shape[1] != 2:
-            raise ValueError(f"Each tsne_result must be (N,2). Got {emb.shape} at index {i}.")
-        if emb.shape[0] != rx_labels.shape[0]:
-            raise ValueError(
-                f"rx_labels has N={rx_labels.shape[0]}, but tsne_result[{i}] has N={emb.shape[0]}."
-            )
+        labs = np.asarray(labels_list[i]).squeeze()
 
-        # Plot each cluster
+        if emb.ndim != 2 or emb.shape[1] != 2:
+            raise ValueError(f"tsne_results[{i}] must be (N,2). Got {emb.shape}.")
+        if labs.ndim != 1:
+            raise ValueError(f"labels_list[{i}] must be (N,). Got {labs.shape}.")
+        if emb.shape[0] != labs.shape[0]:
+            raise ValueError(f"Mismatch at {i}: tsne N={emb.shape[0]} vs labels N={labs.shape[0]}.")
+
+        unique_labels = sorted(np.unique(labs))
+
+        # per-axes color assignment if needed
+        if color_mode == "per_axes":
+            local_color_map = {lab: cmap(j % cmap.N) for j, lab in enumerate(unique_labels)}
+        else:
+            local_color_map = global_color_map
+
         for lab in unique_labels:
-            idx = (rx_labels == lab)
+            idx = (labs == lab)
             pts = emb[idx]
             if len(pts) == 0:
                 continue
@@ -779,15 +825,16 @@ def plot_tsne_clusters_multi(
                 pts[:, 0], pts[:, 1],
                 s=point_size,
                 alpha=alpha,
-                color=color_map[lab],
-                label=f"{lab}°"  # consistent with your original
+                color=local_color_map[lab],
+                label=f"{lab}°"
             )
 
             if show_center_label:
                 cx = np.mean(pts[:, 0])
                 cy = np.mean(pts[:, 1])
+                text_str = f"{int(lab)}°" if np.issubdtype(type(lab), np.number) else str(lab)
                 ax.text(
-                    cx, cy, f"{int(lab)}°",
+                    cx, cy, text_str,
                     fontsize=10,
                     fontweight="bold",
                     ha="center", va="center",
@@ -802,7 +849,6 @@ def plot_tsne_clusters_multi(
 
         ax.set_xlabel("t-SNE Dim 1", fontweight="bold")
         ax.set_ylabel("t-SNE Dim 2", fontweight="bold")
-
         if titles is not None and i < len(titles) and titles[i] is not None:
             ax.set_title(titles[i], fontweight="bold")
 
@@ -814,9 +860,7 @@ def plot_tsne_clusters_multi(
             ax.legend(loc=legend_loc, frameon=True, fontsize=10)
 
     plt.tight_layout()
-
     if save_path is not None:
         plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
-
     plt.show()
     return fig, axes
