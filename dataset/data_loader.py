@@ -372,7 +372,7 @@ class BasePretrainDataset(torch.utils.data.Dataset):
 
 
 
-class DAMUSIC_Loader(BaseAudioDataset):
+class GSC_Loader(BaseAudioDataset):
     def __init__(
         self,
         root: str,
@@ -383,7 +383,7 @@ class DAMUSIC_Loader(BaseAudioDataset):
         noise_aug: bool = False,
         time_aug: bool = False,
         geometry_aug: bool = False,
-        model: str = "DAMUSIC",
+        model: str = "GSC",
         feature: str = "spectrogram",
         num_percent: float = 1.0,
         snr: Optional[int] = None,
@@ -507,7 +507,7 @@ class DAMUSIC_Loader(BaseAudioDataset):
 
 class GSP_Loader_pretrain(BasePretrainDataset):
     """
-    Pretrain on simulation DAMUSIC data: returns masked spec + ori mic0 spec + mask
+    Pretrain on simulation GSC data: returns masked spec + ori mic0 spec + mask
     """
     def __init__(
         self,
@@ -518,7 +518,7 @@ class GSP_Loader_pretrain(BasePretrainDataset):
         noise_aug: bool = False,
         time_aug: bool = False,
         geometry_aug: bool = False,
-        model: str = "DAMUSIC",
+        model: str = "GSC",
         feature: str = "spectrogram",
         num_mic: int = 4,
     ):
@@ -591,7 +591,7 @@ class SoClas_database_pretrain(BasePretrainDataset):
         subset: str = "train",
         noise_aug: bool = False,
         time_aug: bool = False,
-        model: str = "DAMUSIC",
+        model: str = "GSC",
         feature: str = "spectrogram",
         sr: int = 16000,
     ):

@@ -197,9 +197,9 @@ def hermitianize(R: torch.Tensor) -> torch.Tensor:
     return (R + R.transpose(-1, -2).conj()) / 2
 
 
-class DeepMusic_plus(nn.Module):
+class NeuralMusic(nn.Module):
     def __init__(self, N, T, M,device,attention=True,input_channel=8):
-        super(DeepMusic_plus, self).__init__()
+        super(NeuralMusic, self).__init__()
         self.N, self.T, self.M = N, T, M
         self.input_channel = input_channel
         self.angels = torch.linspace(-1 * np.pi , np.pi, 360).to(device)
@@ -258,9 +258,9 @@ class DeepMusic_plus(nn.Module):
         DOA = soft_argmax_peak_refined(spectrum).unsqueeze(1)
         return DOA,spectrum
 
-class DeepMusic_plus_class(nn.Module):
+class NeuralMusic_class(nn.Module):
     def __init__(self, N, T, M,device,input_channel=8):
-        super(DeepMusic_plus_class, self).__init__()
+        super(NeuralMusic_class, self).__init__()
         self.N, self.T, self.M = N, T, None
         self.input_channel = input_channel
         self.angels = torch.linspace(-1 * np.pi , np.pi, 360).to(device)
