@@ -893,6 +893,7 @@ class AV16_Dataset(BaseAudioDataset):
         loc_theta_deg = np.array(doa_xy_deg_from_xyz(xyz), dtype=np.float32)
         return torch.tensor(loc_theta_deg, dtype=torch.float32)
 
+
 class AV16_Dataset_pretrain(BasePretrainDataset):
     def __init__(
         self,
