@@ -44,7 +44,7 @@ class Grid:
     """
     _cached = None
 
-    def __new__(cls, grid_dir="/home/kemove/yyz/SubspaceNet/DeepMucis_plus"):
+    def __new__(cls, grid_dir="./utils"):
         if cls._cached is None:
             obj = super().__new__(cls)
             obj.x = np.load(os.path.join(grid_dir, "grid_x.npy"))
@@ -82,7 +82,7 @@ class ArrayAugConfig:
     enabled: bool = True
     interval: Optional[int] = None          # None -> any degree, else e.g. 5/10
     mic_center: np.ndarray = np.array([[3, 3, 1]], dtype=np.float32)
-    grid_dir: str = "/home/kemove/yyz/SubspaceNet/DeepMucis_plus"
+    grid_dir: str = "./utlis"
 
 class ArrayAugmentor:
     """
@@ -877,7 +877,7 @@ class AV16_Dataset(BaseAudioDataset):
             raise RuntimeError(f"No matched (audio, gt) found under: {self.root}")
 
         self.items = items
-        print(f"[OK] AV16 indexed {len(self.items)} samples from {self.root}")
+        # print(f"[OK] AV16 indexed {len(self.items)} samples from {self.root}")
 
     def _load_audio_np(self, item: Tuple[Path, Path, str]) -> np.ndarray:
         ap, _, _ = item
@@ -947,7 +947,7 @@ class AV16_Dataset_pretrain(BasePretrainDataset):
             raise RuntimeError(f"No matched (audio, gt) found under: {self.root}")
 
         self.items = items
-        print(f"[OK] AV16-pretrain indexed {len(self.items)} samples from {self.root}")
+        # print(f"[OK] AV16-pretrain indexed {len(self.items)} samples from {self.root}")
 
     def _load_audio_np(self, item: Tuple[Path, Path, str]) -> np.ndarray:
         ap, _, _ = item

@@ -12,8 +12,9 @@ We propose a hybrid neural–subspace framework that learns to estimate spatial 
 ## Key Features
 - **Hybrid neural–subspace framework** that combines deep learning with classical MUSIC-based DOA estimation.
 - **Improved robustness** under noise and reverberation through learned spatial statistics.
-- **Strong generalization ability** across different acoustic environments and datasets.
+- **Stronger generalization ability** across different acoustic environments and datasets.
 - **Data efficiency** under limited training sample conditions.
+
 ---
 ## Notebook
 
@@ -21,4 +22,7 @@ All key usages are demonstrated in the provided notebook **`NeuralMusic.ipynb`**
 
 The notebook shows how to use the proposed model, reproduce the testing results, and provides detailed experimental settings for different datasets.
 
+---
+## Documentation
 Further experimental results and additional implementation details are provided in the **`/docs`** directory.
+

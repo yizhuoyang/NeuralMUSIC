@@ -34,7 +34,7 @@ def add_gaussian_noise(audiodata, target_snr_db):
 if __name__ == "__main__":
     ## The function for SNR simulation
     fs = 16000  # Sampling rate
-    audiodata = np.load('/media/kemove/T9/sound_source_loc/simulation_data/train/coherent/NS_1/degree_0.0__times0.npy')  # Simulated audio data (4 mics, 1 sec)
+    audiodata = np.load('/GSC_data/train/coherent/NS_1/degree_0.0__times0.npy')  # Simulated audio data (4 mics, 1 sec)
     target_snr_db = -10  # Set SNR level
     noisy_audio = add_gaussian_noise(audiodata, target_snr_db)
     mic_channel = 0
