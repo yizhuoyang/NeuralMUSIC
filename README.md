@@ -24,5 +24,5 @@ The notebook shows how to use the proposed model, reproduce the testing results,
 
 ---
 ## Documentation
-Further experimental results and additional implementation details are provided in the **`Additional_implementation_details.pdf`** directory.
+Further experimental results and additional implementation details are provided in the **`Additional_implementation_details.pdf`**.
 
