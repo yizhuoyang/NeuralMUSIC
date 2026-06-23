@@ -22,7 +22,10 @@ All key usages are demonstrated in the provided notebook **`NeuralMusic.ipynb`**
 
 The notebook shows how to use the proposed model, reproduce the testing results, and provides detailed experimental settings for different datasets.
 
+We will update the training codes very soon.
 ---
 ## Documentation
 Further experimental results and additional implementation details are provided in the **`Additional_implementation_details.pdf`**.
+
+
 
