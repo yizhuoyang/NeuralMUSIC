@@ -10,7 +10,6 @@ from utlis.util import filter_folders, downsample_audio, normalize_magnitude, no
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as Trans
 import torch
-import matplotlib.pyplot as plt
 import librosa
 from dataset.data_augmentation import add_gaussian_noise
 import pysensing.acoustic.preprocessing.transform as transform
@@ -20,7 +19,7 @@ import re
 import pandas as pd
 import numpy as np
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
 import soundfile as sf
 import scipy.io as sio
@@ -81,7 +80,7 @@ def apply_noise_aug(audio_np: np.ndarray, cfg: NoiseAugConfig) -> np.ndarray:
 class ArrayAugConfig:
     enabled: bool = True
     interval: Optional[int] = None          # None -> any degree, else e.g. 5/10
-    mic_center: np.ndarray = np.array([[3, 3, 1]], dtype=np.float32)
+    mic_center: np.ndarray = field(default_factory=lambda: np.array([[3, 3, 1]], dtype=np.float32))
     grid_dir: str = "./utlis"
 
 class ArrayAugmentor:

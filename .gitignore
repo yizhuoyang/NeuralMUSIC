@@ -1,1 +1,8 @@
 results/
+GSC_data/
+data/
+__pycache__/
+*.pyc
+checkpoints/
+runs/
+NeuralMusic_GSC_Evaluation.ipynb

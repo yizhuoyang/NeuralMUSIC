@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 def add_gaussian_noise(audiodata, target_snr_db):
@@ -32,6 +31,8 @@ def add_gaussian_noise(audiodata, target_snr_db):
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
     ## The function for SNR simulation
     fs = 16000  # Sampling rate
     audiodata = np.load('/GSC_data/train/coherent/NS_1/degree_0.0__times0.npy')  # Simulated audio data (4 mics, 1 sec)
@@ -58,4 +59,3 @@ if __name__ == "__main__":
     plt.legend()
     plt.tight_layout()
     plt.show()
-
